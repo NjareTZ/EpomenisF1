@@ -1,0 +1,1 @@
+GET /telemetry/{driver}
