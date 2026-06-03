@@ -7,6 +7,7 @@ __pycache__/
 # FastF1 cache
 f1-backend/cache/
 f1-backend/__pycache__/
+f1-backend/services/__pycache__/
 
 # Node
 f1-dashboard-ui/node_modules/
@@ -18,3 +19,6 @@ f1-dashboard-ui/build/
 
 # VS Code
 .vscode/
+
+# Misc
+structure.txt
