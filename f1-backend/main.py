@@ -23,11 +23,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Absolute cache path — works locally and on Render
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 fastf1.Cache.enable_cache(CACHE_DIR)
-
 print(f"Cache directory: {CACHE_DIR}")
 
 
@@ -53,12 +51,46 @@ def convert_numpy(obj):
     return obj
 
 
-def get_latest_completed(year):
-    schedule = fastf1.get_event_schedule(year)
-    completed = schedule[
-        pd.to_datetime(schedule["EventDate"]) < pd.Timestamp.now()
-    ]
-    return completed
+def find_latest_race():
+    """
+    Walk backwards from current year to find the most recent
+    race that actually has data available on FastF1.
+    """
+    for year in [2025, 2024, 2023]:
+        try:
+            schedule = fastf1.get_event_schedule(year)
+            completed = schedule[
+                pd.to_datetime(schedule["EventDate"]) < pd.Timestamp.now()
+            ]
+            if completed.empty:
+                continue
+
+            # Try from most recent going backwards
+            for i in range(len(completed) - 1, -1, -1):
+                row = completed.iloc[i]
+                event_name = str(row["EventName"])
+                try:
+                    session = fastf1.get_session(year, event_name, "R")
+                    session.load(
+                        telemetry=True,
+                        weather=False,
+                        messages=False,
+                        laps=True,
+                    )
+                    # Check data actually loaded
+                    if len(session.drivers) > 0 and len(session.laps) > 0:
+                        print(f"Found valid session: {event_name} {year}")
+                        return session, row, year
+                    else:
+                        print(f"No data for {event_name} {year}, trying earlier race...")
+                except Exception as e:
+                    print(f"Failed {event_name} {year}: {e}")
+                    continue
+        except Exception as e:
+            print(f"Failed year {year}: {e}")
+            continue
+
+    return None, None, None
 
 
 @app.get("/")
@@ -74,40 +106,27 @@ async def health():
 @app.get("/replay/latest")
 async def replay_latest():
     try:
-        year = datetime.now().year
-        completed = get_latest_completed(year)
+        session, latest_row, year = find_latest_race()
 
-        # Fall back to previous year if nothing completed yet
-        if completed.empty:
-            year -= 1
-            completed = get_latest_completed(year)
+        if session is None:
+            return {"error": "No race data available"}
 
-        if completed.empty:
-            return {"error": "No completed races found"}
+        event_name = str(latest_row["EventName"])
+        round_num  = int(latest_row.get("RoundNumber", 0))
 
-        latest     = completed.iloc[-1]
-        event_name = str(latest["EventName"])
-        round_num  = int(latest.get("RoundNumber", 0))
+        print(f"Building replay for {event_name} {year}...")
 
-        print(f"Loading: {event_name} {year}")
+        replay = build_replay(session)
 
-        session = fastf1.get_session(year, event_name, "R")
-
-        # Load with telemetry + position data explicitly
-        session.load(
-            telemetry=True,
-            weather=False,
-            messages=False,
-            laps=True,
-        )
-
-        print("Session loaded. Building replay...")
-
-        replay   = build_replay(session)
-        timeline = build_timeline(session)
+        # Build timeline safely
+        try:
+            timeline = build_timeline(session)
+        except Exception as e:
+            print(f"Timeline error (non-fatal): {e}")
+            timeline = []
 
         response = {
-            "race":         event_name,
+            "race":         f"{event_name} {year}",
             "circuit_name": event_name,
             "circuit_info": f"{year} · Round {round_num}",
             "year":         int(year),
@@ -145,4 +164,18 @@ async def replay_sessions():
         return {"sessions": sessions, "year": int(year)}
 
     except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Live endpoint (OpenF1) ────────────────────────────────────────────────────
+
+from services.live import build_live
+
+@app.get("/live")
+async def live():
+    try:
+        data = await build_live()
+        return jsonable_encoder(convert_numpy(data))
+    except Exception as e:
+        print("Live error:", traceback.format_exc())
         return {"error": str(e)}
