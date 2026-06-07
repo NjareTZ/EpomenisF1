@@ -6,6 +6,7 @@ import fastf1
 import pandas as pd
 import numpy as np
 import os
+import traceback
 
 from datetime import datetime
 
@@ -22,10 +23,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use absolute path so it works both locally and on Render
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
+# Absolute cache path — works locally and on Render
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 fastf1.Cache.enable_cache(CACHE_DIR)
+
+print(f"Cache directory: {CACHE_DIR}")
 
 
 def convert_numpy(obj):
@@ -50,6 +53,14 @@ def convert_numpy(obj):
     return obj
 
 
+def get_latest_completed(year):
+    schedule = fastf1.get_event_schedule(year)
+    completed = schedule[
+        pd.to_datetime(schedule["EventDate"]) < pd.Timestamp.now()
+    ]
+    return completed
+
+
 @app.get("/")
 async def root():
     return {"status": "ok"}
@@ -64,49 +75,51 @@ async def health():
 async def replay_latest():
     try:
         year = datetime.now().year
+        completed = get_latest_completed(year)
 
-        print(f"Fetching schedule for {year}...")
-        schedule = fastf1.get_event_schedule(year)
-
-        completed = schedule[
-            pd.to_datetime(schedule["EventDate"]) < pd.Timestamp.now()
-        ]
-
+        # Fall back to previous year if nothing completed yet
         if completed.empty:
-            # Try previous year if no completed races yet
             year -= 1
-            schedule = fastf1.get_event_schedule(year)
-            completed = schedule[
-                pd.to_datetime(schedule["EventDate"]) < pd.Timestamp.now()
-            ]
+            completed = get_latest_completed(year)
 
         if completed.empty:
             return {"error": "No completed races found"}
 
-        latest = completed.iloc[-1]
+        latest     = completed.iloc[-1]
         event_name = str(latest["EventName"])
+        round_num  = int(latest.get("RoundNumber", 0))
 
-        print(f"Loading session: {event_name} {year}")
+        print(f"Loading: {event_name} {year}")
 
         session = fastf1.get_session(year, event_name, "R")
-        session.load()
 
-        replay = build_replay(session)
+        # Load with telemetry + position data explicitly
+        session.load(
+            telemetry=True,
+            weather=False,
+            messages=False,
+            laps=True,
+        )
+
+        print("Session loaded. Building replay...")
+
+        replay   = build_replay(session)
         timeline = build_timeline(session)
 
         response = {
-            "race": event_name,
+            "race":         event_name,
             "circuit_name": event_name,
-            "circuit_info": f"{year} · Round {int(latest.get('RoundNumber', 0))}",
-            "year": int(year),
+            "circuit_info": f"{year} · Round {round_num}",
+            "year":         int(year),
             **convert_numpy(replay),
-            "timeline": convert_numpy(timeline),
+            "timeline":     convert_numpy(timeline),
         }
+
+        print(f"Done. Frames: {len(replay.get('frames', []))}, Track pts: {len(replay.get('track', []))}")
 
         return jsonable_encoder(response)
 
     except Exception as e:
-        import traceback
         print("Replay error:", traceback.format_exc())
         return {"error": str(e)}
 
@@ -114,7 +127,7 @@ async def replay_latest():
 @app.get("/replay/sessions")
 async def replay_sessions():
     try:
-        year = datetime.now().year
+        year     = datetime.now().year
         schedule = fastf1.get_event_schedule(year)
 
         completed = schedule[
@@ -124,8 +137,8 @@ async def replay_sessions():
         sessions = []
         for _, row in completed.iterrows():
             sessions.append({
-                "name": str(row["EventName"]),
-                "date": str(row["EventDate"]),
+                "name":  str(row["EventName"]),
+                "date":  str(row["EventDate"]),
                 "round": int(row.get("RoundNumber", 0)),
             })
 
