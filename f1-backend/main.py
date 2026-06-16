@@ -1,10 +1,8 @@
-from fastapi import FastAPI, HTTPException
+﻿from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
-
-import os, traceback
+import traceback
 from datetime import datetime
-
 from services.openf1 import build_replay, build_live, get_sessions_list
 
 app = FastAPI(title="Epomenis F1 API")
@@ -20,16 +18,13 @@ app.add_middleware(
 CURRENT_YEAR  = datetime.now().year
 PREVIOUS_YEAR = CURRENT_YEAR - 1
 
-
 @app.get("/")
 async def root():
     return {"status": "ok", "powered_by": "OpenF1"}
 
-
 @app.get("/health")
 async def health():
     return {"status": "healthy", "years": [PREVIOUS_YEAR, CURRENT_YEAR]}
-
 
 @app.get("/replay/latest")
 async def replay_latest():
@@ -40,10 +35,8 @@ async def replay_latest():
         print("Replay error:", traceback.format_exc())
         return {"error": str(e)}
 
-
 @app.get("/replay/session/{session_key}")
 async def replay_session(session_key: int):
-    """Load replay for a specific session key."""
     try:
         data = await build_replay(session_key=session_key)
         return jsonable_encoder(data)
@@ -51,16 +44,13 @@ async def replay_session(session_key: int):
         print(f"Replay {session_key} error:", traceback.format_exc())
         return {"error": str(e)}
 
-
 @app.get("/replay/sessions")
 async def replay_sessions():
-    """List all available race sessions for current and previous year."""
     try:
         sessions = await get_sessions_list([PREVIOUS_YEAR, CURRENT_YEAR])
         return {"sessions": sessions, "total": len(sessions)}
     except Exception as e:
         return {"error": str(e)}
-
 
 @app.get("/live")
 async def live():
