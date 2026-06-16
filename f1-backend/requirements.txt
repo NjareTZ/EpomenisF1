@@ -1,8 +1,4 @@
 fastapi
 uvicorn
 httpx
-fastf1
-pandas
-numpy
-cachetools
 python-multipart
