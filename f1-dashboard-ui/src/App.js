@@ -38,7 +38,7 @@ function groupFramesByTime(frames, driverMap) {
 }
 
 export default function App() {
-  const [mode, setMode]               = useState("replay"); // "replay" | "live"
+  const [mode, setMode]               = useState("replay");
   const [track, setTrack]             = useState([]);
   const [drivers, setDrivers]         = useState({});
   const [snapshots, setSnapshots]     = useState([]);
@@ -52,55 +52,78 @@ export default function App() {
   const [speed, setSpeed]             = useState(1);
   const [snapIndex, setSnapIndex]     = useState(0);
   const [loading, setLoading]         = useState(true);
+  const [loadingMsg, setLoadingMsg]   = useState("Connecting to server...");
   const [error, setError]             = useState(null);
   const [isLive, setIsLive]           = useState(false);
   const [currentLap, setCurrentLap]   = useState(1);
   const [totalLaps, setTotalLaps]     = useState(70);
   const liveIntervalRef               = useRef(null);
+  const pollRef                       = useRef(null);
 
-  // ── Load replay data ────────────────────────────────────
-  const loadReplay = useCallback(async () => {
-    setLoading(true); setError(null);
-    try {
-      const res  = await fetch(`${API}/replay/latest`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-
-      const driverMap = {};
-      (data.drivers || []).forEach(d => {
-        driverMap[d.number] = { ...d, color: TEAM_COLORS[d.team] || "#fff" };
-      });
-
-      const snaps = groupFramesByTime(data.frames || [], driverMap);
-      setDrivers(driverMap);
-      setTrack(data.track       || []);
-      setPitStops(data.pit_events    || []);
-      setOvertakes(data.overtake_events || []);
-      setRace(data.race         || "");
-      setCircuitName(data.circuit_name || data.race || "");
-      setCircuitInfo(data.circuit_info || "");
-      setSnapshots(snaps);
-      setTotalLaps(snaps.length ? (snaps[snaps.length - 1]?.lap || 70) : 70);
-      setLoading(false);
-      setPlaying(true);
-    } catch (err) {
-      setError(err.message);
-      setLoading(false);
-    }
+  const applyReplayData = useCallback((data, driverMap) => {
+    const snaps = groupFramesByTime(data.frames || [], driverMap);
+    setTrack(data.track            || []);
+    setPitStops(data.pit_events    || []);
+    setOvertakes(data.overtake_events || []);
+    setRace(data.race              || "");
+    setCircuitName(data.circuit_name || data.race || "");
+    setCircuitInfo(data.circuit_info || "");
+    setSnapshots(snaps);
+    setTotalLaps(snaps.length ? (snaps[snaps.length - 1]?.lap || 70) : 70);
+    setLoading(false);
+    setPlaying(true);
   }, []);
 
-  // ── Load live data (polls every 2s) ─────────────────────
+  // ── Load replay with polling ─────────────────────────────
+  const loadReplay = useCallback(async () => {
+    setLoading(true); setError(null);
+    setLoadingMsg("Waking up server...");
+
+    const poll = async () => {
+      try {
+        const res  = await fetch(`${API}/replay/latest`);
+        const data = await res.json();
+
+        if (res.status === 202 || data.status === "loading") {
+          setLoadingMsg(data.message || "Loading race data, please wait...");
+          pollRef.current = setTimeout(poll, 5000); // retry every 5s
+          return;
+        }
+
+        if (data.error) throw new Error(data.error);
+
+        const driverMap = {};
+        (data.drivers || []).forEach(d => {
+          driverMap[d.number] = { ...d, color: TEAM_COLORS[d.team] || "#fff" };
+        });
+        setDrivers(driverMap);
+        applyReplayData(data, driverMap);
+
+      } catch (err) {
+        if (err.message.includes("Failed to fetch") || err.message.includes("ERR_CONNECTION")) {
+          setLoadingMsg("Server is starting up, retrying...");
+          pollRef.current = setTimeout(poll, 8000);
+        } else {
+          setError(err.message);
+          setLoading(false);
+        }
+      }
+    };
+
+    poll();
+  }, [applyReplayData]);
+
+  // ── Load live data ───────────────────────────────────────
   const loadLive = useCallback(async () => {
     try {
       const res  = await fetch(`${API}/live`);
       const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      if (data.error) { console.warn("Live error:", data.error); return; }
 
       const driverMap = {};
       (data.drivers || []).forEach(d => {
         driverMap[d.number] = { ...d, color: d.color || TEAM_COLORS[d.team] || "#fff" };
       });
-
       setDrivers(driverMap);
       setRace(data.race         || "");
       setCircuitName(data.circuit_name || "");
@@ -112,27 +135,32 @@ export default function App() {
       setCurrentLap(data.current_lap || 1);
       setLoading(false);
     } catch (err) {
-      setError(err.message);
-      setLoading(false);
+      console.warn("Live fetch error:", err.message);
     }
   }, []);
 
   // ── Switch modes ─────────────────────────────────────────
   useEffect(() => {
     setLoading(true); setError(null); setCars([]); setSnapshots([]);
+    if (pollRef.current)       clearTimeout(pollRef.current);
     if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
 
     if (mode === "replay") {
       setIsLive(false);
       loadReplay();
     } else {
-      loadLive();
-      liveIntervalRef.current = setInterval(loadLive, 2000);
+      setLoadingMsg("Connecting to live feed...");
+      loadLive().then(() => setLoading(false));
+      liveIntervalRef.current = setInterval(loadLive, 3000);
     }
-    return () => { if (liveIntervalRef.current) clearInterval(liveIntervalRef.current); };
+
+    return () => {
+      if (pollRef.current)       clearTimeout(pollRef.current);
+      if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
+    };
   }, [mode, loadReplay, loadLive]);
 
-  // ── Replay playback ticker ───────────────────────────────
+  // ── Replay ticker ────────────────────────────────────────
   useEffect(() => {
     if (mode !== "replay" || !playing || !snapshots.length) return;
     const timer = setInterval(() => {
@@ -144,14 +172,11 @@ export default function App() {
     return () => clearInterval(timer);
   }, [mode, playing, speed, snapshots.length]);
 
-  // ── Update cars from snapshot (replay only) ──────────────
+  // ── Update cars from snapshot ────────────────────────────
   useEffect(() => {
     if (mode !== "replay" || !snapshots.length) return;
     const snap = snapshots[Math.floor(snapIndex)];
-    if (snap?.cars) {
-      setCars(snap.cars);
-      setCurrentLap(snap.lap || 1);
-    }
+    if (snap?.cars) { setCars(snap.cars); setCurrentLap(snap.lap || 1); }
   }, [snapIndex, snapshots, mode]);
 
   const progress = snapshots.length ? (snapIndex / snapshots.length) * 100 : 0;
@@ -162,27 +187,23 @@ export default function App() {
       padding: 20, fontFamily: "'Courier New', monospace",
     }}>
 
-      {/* ── Header ── */}
+      {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 20, fontWeight: 700, letterSpacing: "0.08em", color: "#e2e8f0", margin: 0 }}>
           F1 RACE DASHBOARD
         </h1>
         <span style={{ fontSize: 13, color: "#475569" }}>{race}</span>
-
-        {/* Mode toggle */}
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button onClick={() => setMode("replay")}
-            style={btnStyle(mode === "replay" ? "#f59e0b" : "#1e2d3d")}>
+          <button onClick={() => setMode("replay")} style={btnStyle(mode === "replay" ? "#f59e0b" : "#1e2d3d")}>
             ⏪ REPLAY
           </button>
-          <button onClick={() => setMode("live")}
-            style={btnStyle(mode === "live" ? "#22c55e" : "#1e2d3d")}>
+          <button onClick={() => setMode("live")} style={btnStyle(mode === "live" ? "#22c55e" : "#1e2d3d")}>
             {isLive ? "🔴 LIVE" : "📡 LATEST"}
           </button>
         </div>
       </div>
 
-      {/* ── Replay controls ── */}
+      {/* Replay controls */}
       {mode === "replay" && (
         <div style={{ display: "flex", gap: 10, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
           <button onClick={() => setPlaying(p => !p)} style={btnStyle("#22c55e")}>
@@ -201,8 +222,8 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Live status bar ── */}
-      {mode === "live" && (
+      {/* Live status */}
+      {mode === "live" && !loading && (
         <div style={{ display: "flex", gap: 12, marginBottom: 10, alignItems: "center" }}>
           <div style={{
             display: "flex", alignItems: "center", gap: 6,
@@ -213,20 +234,18 @@ export default function App() {
             <div style={{
               width: 7, height: 7, borderRadius: "50%",
               background: isLive ? "#22c55e" : "#475569",
-              animation: isLive ? "pulse 1.5s infinite" : "none",
             }} />
             <span style={{ fontSize: 11, color: isLive ? "#22c55e" : "#475569", fontWeight: 700 }}>
               {isLive ? "LIVE" : "LATEST SESSION"}
             </span>
           </div>
           <span style={{ fontSize: 11, color: "#334155" }}>
-            LAP <span style={{ color: "#94a3b8" }}>{currentLap}</span>
-            {" · "}{cars.length} cars · updates every 2s
+            LAP <span style={{ color: "#94a3b8" }}>{currentLap}</span> · {cars.length} cars
           </span>
         </div>
       )}
 
-      {/* ── Progress bar (replay only) ── */}
+      {/* Progress bar */}
       {mode === "replay" && (
         <div style={{ width: "100%", height: 3, background: "#0f1923", borderRadius: 2, marginBottom: 18 }}>
           <div style={{
@@ -237,13 +256,19 @@ export default function App() {
         </div>
       )}
 
-      {/* ── States ── */}
+      {/* Loading state */}
       {loading && (
-        <div style={{ color: "#1e3a2a", fontSize: 13, marginTop: 60, textAlign: "center", letterSpacing: "0.1em" }}>
-          {mode === "live" ? "CONNECTING TO LIVE FEED..." : "LOADING RACE DATA..."}
+        <div style={{ textAlign: "center", marginTop: 80 }}>
+          <div style={{ fontSize: 11, color: "#22c55e", letterSpacing: "0.15em", marginBottom: 12 }}>
+            ⏳ {loadingMsg}
+          </div>
+          <div style={{ fontSize: 10, color: "#1e2d3d" }}>
+            First load takes 2-3 minutes while race data downloads
+          </div>
         </div>
       )}
 
+      {/* Error */}
       {error && (
         <div style={{
           color: "#e8002d", fontSize: 12, marginTop: 40, textAlign: "center",
@@ -251,30 +276,27 @@ export default function App() {
           borderRadius: 8, padding: "16px 24px",
         }}>
           ⚠ {error}
+          <br />
+          <button onClick={loadReplay}
+            style={{ ...btnStyle("#e8002d"), marginTop: 12, fontSize: 10 }}>
+            RETRY
+          </button>
         </div>
       )}
 
-      {/* ── Main layout ── */}
+      {/* Main layout */}
       {!loading && !error && (
         <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <Track
-              track={track}
-              cars={cars}
-              circuitName={circuitName}
-              circuitInfo={circuitInfo}
+              track={track} cars={cars}
+              circuitName={circuitName} circuitInfo={circuitInfo}
               lapInfo={`LAP ${currentLap}/${totalLaps}`}
             />
           </div>
-
           <div style={{ width: 255, flexShrink: 0, display: "flex", flexDirection: "column", gap: 14 }}>
-            <Leaderboard
-              cars={cars}
-              results={[]}
-              drivers={drivers}
-              mode={mode === "live" && isLive ? "live" : "replay"}
-            />
-
+            <Leaderboard cars={cars} results={[]} drivers={drivers}
+              mode={mode === "live" && isLive ? "live" : "replay"} />
             <div style={panelStyle}>
               <div style={panelHeaderStyle}>PIT STOPS</div>
               <div style={{ maxHeight: 140, overflowY: "auto", padding: "4px 0" }}>
@@ -289,7 +311,6 @@ export default function App() {
                 {!pitStops.length && <div style={{ color: "#1e2d3d", fontSize: 11, padding: "8px 14px" }}>No pit stops</div>}
               </div>
             </div>
-
             {mode === "replay" && (
               <div style={panelStyle}>
                 <div style={panelHeaderStyle}>OVERTAKES</div>
@@ -309,17 +330,16 @@ export default function App() {
           </div>
         </div>
       )}
-
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}`}</style>
     </div>
   );
 }
 
-const btnStyle = (color) => ({
-  background: "transparent", border: `1px solid ${color}`, color,
+const btnStyle = c => ({
+  background: "transparent", border: `1px solid ${c}`, color: c,
   padding: "5px 14px", borderRadius: 6, fontSize: 11, fontWeight: 700,
   cursor: "pointer", letterSpacing: "0.08em", fontFamily: "'Courier New', monospace",
 });
-const panelStyle = { background: "#0d1117", borderRadius: 10, border: "1px solid #1e2530", overflow: "hidden" };
+const panelStyle      = { background: "#0d1117", borderRadius: 10, border: "1px solid #1e2530", overflow: "hidden" };
 const panelHeaderStyle = { background: "#111827", padding: "8px 14px", borderBottom: "1px solid #1e2530", fontSize: 10, fontWeight: 700, color: "#334155", letterSpacing: "0.12em" };
-const eventRowStyle = { display: "flex", gap: 8, padding: "4px 14px", fontSize: 11, borderBottom: "1px solid #0a0f16", fontFamily: "'Courier New', monospace" };
+const eventRowStyle   = { display: "flex", gap: 8, padding: "4px 14px", fontSize: 11, borderBottom: "1px solid #0a0f16", fontFamily: "'Courier New', monospace" };
